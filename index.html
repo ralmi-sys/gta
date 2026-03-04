@@ -3,32 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D Neon Cyber GTA</title>
+    <title>Cyberpunk GTA 3D</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: 'Orbitron', sans-serif; }
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
         #ui {
             position: absolute; top: 20px; left: 20px; color: #0ff;
-            text-shadow: 0 0 10px #0ff; pointer-events: none;
+            text-shadow: 0 0 10px #0ff; pointer-events: none; z-index: 10;
         }
-        .stat { font-size: 24px; margin-bottom: 5px; }
-        #loading {
-            position: fixed; width: 100%; height: 100%; background: #000;
-            display: flex; justify-content: center; align-items: center; color: #fff; z-index: 100;
-        }
+        .hint { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); color: #fff; background: rgba(0,0,0,0.7); padding: 10px 20px; border-radius: 20px; border: 1px solid #0ff; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 10px; height: 10px; border: 1px solid #0ff; transform: translate(-50%, -50%); border-radius: 50%; display: none; }
+        canvas { display: block; }
     </style>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
 
-<div id="loading">INITIALIZING NEON CITY...</div>
-
 <div id="ui">
-    <div class="stat" id="money">$000,500</div>
-    <div class="stat" id="speed">0 KM/H</div>
-    <div style="width: 200px; height: 10px; border: 1px solid #0ff;">
-        <div id="hp-bar" style="width: 100%; height: 100%; background: #0ff;"></div>
-    </div>
+    <div style="font-size: 24px; font-weight: bold;">NEON DISTRICT</div>
+    <div id="status">ON FOOT</div>
+    <div id="speed" style="display:none;">0 KM/H</div>
 </div>
+
+<div id="crosshair"></div>
+<div class="hint" id="hint">WASD - Move | F - Enter/Exit Car | Space - Jump/Brake</div>
 
 <script type="importmap">
     {
@@ -45,20 +41,23 @@
     import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
     import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
-    // --- КОНФИГУРАЦИЯ ---
+    // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
     let scene, camera, renderer, composer, clock;
-    let player, car, cityGroup;
-    let buildings = [];
-    const input = { forward: false, backward: false, left: false, right: false };
+    let worldGrid = 160;
+    let citySize = 1000;
+    
+    // Сущности
+    let player, car, currentMode = 'foot'; // 'foot' или 'car'
+    let buildings = [], traffic = [];
+    let keys = {};
 
-    // Состояние авто
-    const carPhysics = {
-        speed: 0,
-        acceleration: 0.005,
-        friction: 0.98,
-        maxSpeed: 0.5,
-        turnSpeed: 0.03,
-        angle: 0
+    // Физика и параметры
+    const params = {
+        playerSpeed: 0.15,
+        carSpeed: 0,
+        carMaxSpeed: 0.8,
+        carAccel: 0.008,
+        carTurn: 0.04
     };
 
     init();
@@ -66,9 +65,10 @@
     function init() {
         clock = new THREE.Clock();
         scene = new THREE.Scene();
-        scene.fog = new THREE.FogExp2(0x050510, 0.05);
+        scene.background = new THREE.Color(0x020205);
+        scene.fog = new THREE.FogExp2(0x020205, 0.03);
 
-        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
         
         renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -76,147 +76,173 @@
         renderer.toneMapping = THREE.ReinhardToneMapping;
         document.body.appendChild(renderer.domElement);
 
-        // Постобработка Bloom
+        // Постобработка (Bloom)
         const renderPass = new RenderPass(scene, camera);
-        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.2, 0.4, 0.8);
         composer = new EffectComposer(renderer);
         composer.addPass(renderPass);
         composer.addPass(bloomPass);
 
-        // Свет
-        const ambient = new THREE.AmbientLight(0x404040, 0.5);
-        scene.add(ambient);
+        // Освещение
+        scene.add(new THREE.AmbientLight(0x404040, 0.5));
+        const dirLight = new THREE.DirectionalLight(0xff00ff, 0.5);
+        dirLight.position.set(100, 100, 50);
+        scene.add(dirLight);
 
-        const sun = new THREE.DirectionalLight(0xff00ff, 1);
-        sun.position.set(5, 10, 5);
-        scene.add(sun);
+        setupWorld();
+        setupPlayer();
+        setupCar();
+        setupTraffic();
 
-        createCity();
-        createPlayerCar();
-
-        window.addEventListener('keydown', (e) => handleKey(e.code, true));
-        window.addEventListener('keyup', (e) => handleKey(e.code, false));
+        window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code === 'KeyF') toggleMode(); });
+        window.addEventListener('keyup', e => { keys[e.code] = false; });
         window.addEventListener('resize', onWindowResize);
 
-        document.getElementById('loading').style.display = 'none';
         animate();
     }
 
-    function createCity() {
-        cityGroup = new THREE.Group();
-        const roadGeo = new THREE.PlaneGeometry(200, 200);
-        const roadMat = new THREE.MeshStandardMaterial({ color: 0x111115 });
-        const ground = new THREE.Mesh(roadGeo, roadMat);
+    function setupWorld() {
+        // Пол (Асфальт)
+        const planeGeo = new THREE.PlaneGeometry(citySize, citySize);
+        const planeMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.1 });
+        const ground = new THREE.Mesh(planeGeo, planeMat);
         ground.rotation.x = -Math.PI / 2;
         scene.add(ground);
 
         // Сетка дорог
-        const grid = new THREE.GridHelper(200, 40, 0x00ffff, 0x222222);
-        grid.position.y = 0.01;
+        const grid = new THREE.GridHelper(citySize, 50, 0x00ffff, 0x222222);
+        grid.position.y = 0.05;
         scene.add(grid);
 
         // Генерация зданий
-        for (let i = 0; i < 60; i++) {
-            const h = 5 + Math.random() * 15;
-            const w = 2 + Math.random() * 3;
+        for (let i = 0; i < 150; i++) {
+            const h = 20 + Math.random() * 60;
+            const w = 10 + Math.random() * 10;
             const geo = new THREE.BoxGeometry(w, h, w);
+            const color = new THREE.Color().setHSL(Math.random() * 0.2 + 0.5, 1, 0.5);
             
-            // Материал здания с неоновыми окнами
             const mat = new THREE.MeshStandardMaterial({ 
-                color: 0x050505,
-                emissive: new THREE.Color(Math.random() > 0.5 ? 0x00ffff : 0xff00ff),
-                emissiveIntensity: Math.random() * 0.5
+                color: 0x0a0a0a,
+                emissive: color,
+                emissiveIntensity: Math.random() * 0.4
             });
 
             const b = new THREE.Mesh(geo, mat);
             
-            // Расстановка по сетке (чтобы не на дорогах)
-            b.position.x = (Math.floor(Math.random() * 20) - 10) * 8;
-            b.position.z = (Math.floor(Math.random() * 20) - 10) * 8;
-            b.position.y = h / 2;
-            
-            if (Math.abs(b.position.x) < 5 && Math.abs(b.position.z) < 5) continue; // Пусто в центре
+            // Расстановка вне дорог
+            let x = (Math.random() - 0.5) * citySize;
+            let z = (Math.random() - 0.5) * citySize;
+            // Простое избегание "дорог" на сетке 20м
+            x = Math.round(x / 20) * 20 + 10;
+            z = Math.round(z / 20) * 20 + 10;
 
+            b.position.set(x, h/2, z);
             buildings.push(b);
             scene.add(b);
         }
     }
 
-    function createPlayerCar() {
-        const carGroup = new THREE.Group();
+    function setupPlayer() {
+        const geo = new THREE.CapsuleGeometry(0.5, 1, 4, 8);
+        const mat = new THREE.MeshStandardMaterial({ color: 0x00ff00 });
+        player = new THREE.Mesh(geo, mat);
+        player.position.set(0, 1, 5);
+        scene.add(player);
+    }
 
-        // Кузов
+    function setupCar() {
+        car = new THREE.Group();
         const body = new THREE.Mesh(
-            new THREE.BoxGeometry(1.2, 0.5, 2.2),
-            new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.2 })
+            new THREE.BoxGeometry(2, 0.8, 4),
+            new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.5 })
         );
-        body.position.y = 0.4;
-        carGroup.add(body);
+        body.position.y = 0.6;
+        car.add(body);
 
-        // Кабина
-        const roof = new THREE.Mesh(
-            new THREE.BoxGeometry(1, 0.4, 1.2),
-            new THREE.MeshStandardMaterial({ color: 0x111111 })
-        );
-        roof.position.set(0, 0.8, -0.2);
-        carGroup.add(roof);
+        // Фары
+        const headLight = new THREE.PointLight(0xffffff, 10, 20);
+        headLight.position.set(0, 0.5, 2.1);
+        car.add(headLight);
 
-        // Фары (светящиеся)
-        const lightGeo = new THREE.BoxGeometry(0.3, 0.1, 0.1);
-        const headLightMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-        const L1 = new THREE.Mesh(lightGeo, headLightMat);
-        L1.position.set(0.4, 0.4, 1.1);
-        carGroup.add(L1);
-
-        const L2 = L1.clone();
-        L2.position.x = -0.4;
-        carGroup.add(L2);
-
-        // Задние огни
-        const tailLightMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-        const T1 = new THREE.Mesh(lightGeo, tailLightMat);
-        T1.position.set(0.4, 0.4, -1.1);
-        carGroup.add(T1);
-
-        car = carGroup;
+        car.position.set(5, 0, 10);
         scene.add(car);
     }
 
-    function handleKey(code, isDown) {
-        if (code === 'KeyW' || code === 'ArrowUp') input.forward = isDown;
-        if (code === 'KeyS' || code === 'ArrowDown') input.backward = isDown;
-        if (code === 'KeyA' || code === 'ArrowLeft') input.left = isDown;
-        if (code === 'KeyD' || code === 'ArrowRight') input.right = isDown;
+    function setupTraffic() {
+        for(let i=0; i<20; i++) {
+            const tCar = new THREE.Mesh(
+                new THREE.BoxGeometry(2, 1, 4),
+                new THREE.MeshStandardMaterial({ color: 0xff0055 })
+            );
+            tCar.position.set((Math.random()-0.5)*citySize, 0.5, (Math.random()-0.5)*citySize);
+            tCar.userData.speed = 0.2 + Math.random() * 0.2;
+            traffic.push(tCar);
+            scene.add(tCar);
+        }
+    }
+
+    function toggleMode() {
+        const dist = player.position.distanceTo(car.position);
+        if (currentMode === 'foot' && dist < 5) {
+            currentMode = 'car';
+            player.visible = false;
+            document.getElementById('status').innerText = 'DRIVING';
+            document.getElementById('speed').style.display = 'block';
+            document.getElementById('crosshair').style.display = 'none';
+        } else if (currentMode === 'car') {
+            currentMode = 'foot';
+            player.visible = true;
+            player.position.copy(car.position).add(new THREE.Vector3(3, 1, 0));
+            document.getElementById('status').innerText = 'ON FOOT';
+            document.getElementById('speed').style.display = 'none';
+        }
     }
 
     function updatePhysics() {
-        if (input.forward) carPhysics.speed += carPhysics.acceleration;
-        if (input.backward) carPhysics.speed -= carPhysics.acceleration;
+        if (currentMode === 'foot') {
+            // Движение игрока
+            if (keys['KeyW']) player.position.z -= Math.cos(player.rotation.y) * params.playerSpeed;
+            if (keys['KeyS']) player.position.z += Math.cos(player.rotation.y) * params.playerSpeed;
+            if (keys['KeyA']) player.rotation.y += 0.05;
+            if (keys['KeyD']) player.rotation.y -= 0.05;
 
-        carPhysics.speed *= carPhysics.friction;
+            // Камера пешком
+            const camTarget = player.position.clone().add(new THREE.Vector3(
+                Math.sin(player.rotation.y) * 10, 
+                5, 
+                Math.cos(player.rotation.y) * 10
+            ));
+            camera.position.lerp(camTarget, 0.1);
+            camera.lookAt(player.position);
+        } else {
+            // Движение машины
+            if (keys['KeyW']) params.carSpeed += params.carAccel;
+            if (keys['KeyS']) params.carSpeed -= params.carAccel;
+            
+            params.carSpeed *= 0.98; // Трение
 
-        if (Math.abs(carPhysics.speed) > 0.01) {
-            const direction = carPhysics.speed > 0 ? 1 : -1;
-            if (input.left) carPhysics.angle += carPhysics.turnSpeed * direction;
-            if (input.right) carPhysics.angle -= carPhysics.turnSpeed * direction;
+            if (Math.abs(params.carSpeed) > 0.01) {
+                const dir = params.carSpeed > 0 ? 1 : -1;
+                if (keys['KeyA']) car.rotation.y += params.carTurn * dir;
+                if (keys['KeyD']) car.rotation.y -= params.carTurn * dir;
+            }
+
+            car.translateZ(params.carSpeed);
+            
+            // Камера в машине
+            const relativeCameraOffset = new THREE.Vector3(0, 5, -12);
+            const cameraOffset = relativeCameraOffset.applyMatrix4(car.matrixWorld);
+            camera.position.lerp(cameraOffset, 0.1);
+            camera.lookAt(car.position);
+
+            document.getElementById('speed').innerText = Math.round(Math.abs(params.carSpeed) * 200) + ' KM/H';
         }
 
-        // Движение
-        car.position.x += Math.sin(carPhysics.angle) * carPhysics.speed;
-        car.position.z += Math.cos(carPhysics.angle) * carPhysics.speed;
-        car.rotation.y = carPhysics.angle;
-
-        // Эффект наклона при повороте
-        car.rotation.z = THREE.MathUtils.lerp(car.rotation.z, (input.left ? 0.1 : input.right ? -0.1 : 0), 0.1);
-
-        // Камера следует за авто
-        const camOffset = new THREE.Vector3(0, 3, -7);
-        camOffset.applyQuaternion(car.quaternion);
-        camera.position.lerp(car.position.clone().add(camOffset), 0.1);
-        camera.lookAt(car.position);
-
-        // UI
-        document.getElementById('speed').innerText = Math.round(Math.abs(carPhysics.speed) * 300) + " KM/H";
+        // Обновление трафика
+        traffic.forEach(t => {
+            t.translateZ(t.userData.speed);
+            if(t.position.length() > citySize/2) t.position.set((Math.random()-0.5)*citySize, 0.5, (Math.random()-0.5)*citySize);
+        });
     }
 
     function onWindowResize() {
