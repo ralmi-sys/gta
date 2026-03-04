@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Web GTA</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background-color: #000; font-family: 'Courier New', Courier, monospace; }
+        canvas { display: block; width: 100%; height: 100%; }
+        
+        /* UI Styles */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; }
+        .hud-top { display: flex; justify-content: space-between; align-items: flex-start; }
+        .stats { background: rgba(0,0,0,0.6); padding: 10px; border-radius: 8px; color: #fff; font-weight: bold; }
+        .money { font-size: 20px; color: #4ade80; margin-bottom: 5px; }
+        .bar-container { width: 120px; height: 10px; background: #333; margin-bottom: 5px; border: 1px solid #000; }
+        .bar-health { height: 100%; background: #ef4444; width: 100%; transition: width 0.2s; }
+        .bar-armor { height: 100%; background: #3b82f6; width: 100%; }
+        .stars { color: #555; font-size: 24px; letter-spacing: 2px; text-shadow: 1px 1px 2px #000; }
+        .star.active { color: #facc15; }
+        
+        .radio-box { align-self: flex-end; background: rgba(0,0,0,0.6); padding: 5px 10px; color: #fff; border-radius: 5px; margin-bottom: 20px; pointer-events: auto; cursor: pointer; }
+        
+        /* Mobile Controls */
+        #mobile-controls { display: none; position: absolute; bottom: 20px; left: 0; width: 100%; padding: 0 20px; pointer-events: auto; }
+        #joystick-zone { width: 120px; height: 120px; background: rgba(255,255,255,0.1); border-radius: 50%; position: relative; border: 2px solid rgba(255,255,255,0.3); }
+        #joystick-stick { width: 50px; height: 50px; background: rgba(255,255,255,0.5); border-radius: 50%; position: absolute; top: 35px; left: 35px; pointer-events: none; }
+        .action-btns { display: flex; gap: 10px; position: absolute; right: 20px; bottom: 0; }
+        .btn { width: 60px; height: 60px; border-radius: 50%; background: rgba(255,255,255,0.2); border: 2px solid rgba(255,255,255,0.5); color: #fff; display: flex; justify-content: center; align-items: center; font-size: 12px; text-align: center; line-height: 1; }
+        .btn:active { background: rgba(255,255,255,0.5); }
+        
+        @media (max-width: 800px) { #mobile-controls { display: flex; justify-content: space-between; align-items: flex-end; } }
+    </style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<div id="ui-layer">
+    <div class="hud-top">
+        <div class="stats">
+            <div class="money" id="ui-money">$000000</div>
+            <div class="bar-container"><div class="bar-health" id="ui-health"></div></div>
+            <div class="bar-container"><div class="bar-armor" id="ui-armor"></div></div>
+        </div>
+        <div class="stars" id="ui-stars">★ ★ ★ ★ ★</div>
+    </div>
+    <div class="radio-box" id="ui-radio">Radio: OFF</div>
+</div>
+
+<div id="mobile-controls">
+    <div id="joystick-zone"><div id="joystick-stick"></div></div>
+    <div class="action-btns">
+        <div class="btn" id="btn-brake">BRK</div>
+        <div class="btn" id="btn-shoot">SHT</div>
+        <div class="btn" id="btn-enter">ENT</div>
+    </div>
+</div>
+
+<script>
+/** * GAME CONFIGURATION 
+ */
+const TILE = 80; 
+const MAP_SIZE = 50; 
+const FPS = 60;
+const CANVAS = document.getElementById('game');
+const CTX = CANVAS.getContext('2d');
+
+let W = window.innerWidth;
+let H = window.innerHeight;
+CANVAS.width = W; CANVAS.height = H;
+
+window.addEventListener('resize', () => { W = window.innerWidth; H = window.innerHeight; CANVAS.width = W; CANVAS.height = H; });
+
+/**
+ * AUDIO SYSTEM (Web Audio API)
+ */
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playSound(type) {
+    if(audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    
+    if (type === 'shoot') {
+        osc.type = 'square'; osc.frequency.setValueAtTime(400, audioCtx.currentTime); osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime); gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    } else if (type === 'hit') {
+        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime); gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+    } else if (type === 'engine') {
+        // Engine sound placeholder - continuous loops are complex for one file, omitted for brevity.
+    }
+}
+
+/**
+ * INPUT MANAGER
+ */
+const Input = { 
+    x: 0, y: 0, aimX: 0, aimY: 0, shoot: false, enter: false, brake: false,
+    keys: {}
+};
+
+window.addEventListener('keydown', e => { Input.keys[e.key.toLowerCase()] = true; if(e.key==='e' || e.key==='Enter') Input.enter = true; if(e.key===' ') Input.brake = true; });
+window.addEventListener('keyup', e => { Input.keys[e.key.toLowerCase()] = false; if(e.key==='e' || e.key==='Enter') Input.enter = false; if(e.key===' ') Input.brake = false; });
+window.addEventListener('mousedown', e => { Input.shoot = true; updateAim(e); });
+window.addEventListener('mouseup', () => Input.shoot = false);
+window.addEventListener('mousemove', e => updateAim(e));
+
+function updateAim(e) {
+    // Convert screen coordinates to world direction based on center (player)
+    Input.aimX = e.clientX - W/2;
+    Input.aimY = e.clientY - H/2;
+}
+
+// Touch Input
+const joyZone = document.getElementById('joystick-zone');
+const joyStick = document.getElementById('joystick-stick');
+let joyCenter = {x:0, y:0};
+
+joyZone.addEventListener('touchstart', e => {
+    const rect = joyZone.getBoundingClientRect();
+    joyCenter = { x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+    handleTouchMove(e);
+}, {passive: false});
+joyZone.addEventListener('touchmove', handleTouchMove, {passive: false});
+joyZone.addEventListener('touchend', () => { Input.x = 0; Input.y = 0; joyStick.style.transform = `translate(0px, 0px)`; }, {passive: false});
+
+function handleTouchMove(e) {
+    e.preventDefault();
+    const touch = e.targetTouches[0];
+    let dx = touch.clientX - joyCenter.x;
+    let dy = touch.clientY - joyCenter.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const max = 40;
+    if (dist > max) { dx = (dx/dist)*max; dy = (dy/dist)*max; }
+    joyStick.style.transform = `translate(${dx}px, ${dy}px)`;
+    Input.x = dx/max; Input.y = dy/max;
+}
+
+document.getElementById('btn-enter').addEventListener('touchstart', (e)=>{e.preventDefault(); Input.enter=true;});
+document.getElementById('btn-enter').addEventListener('touchend', (e)=>{e.preventDefault(); Input.enter=false;});
+document.getElementById('btn-shoot').addEventListener('touchstart', (e)=>{e.preventDefault(); Input.shoot=true;});
+document.getElementById('btn-shoot').addEventListener('touchend', (e)=>{e.preventDefault(); Input.shoot=false;});
+document.getElementById('btn-brake').addEventListener('touchstart', (e)=>{e.preventDefault(); Input.brake=true;});
+document.getElementById('btn-brake').addEventListener('touchend', (e)=>{e.preventDefault(); Input.brake=false;});
+
+/**
+ * MAP & CAMERA
+ */
+// Map types: 0=Grass, 1=Road, 2=Sidewalk, 3=Building, 4=Repaint
+const MapGrid = new Uint8Array(MAP_SIZE * MAP_SIZE);
+for (let y = 0; y < MAP_SIZE; y++) {
+    for (let x = 0; x < MAP_SIZE; x++) {
+        let type = 0; // Grass
+        if (x % 5 === 0 || y % 5 === 0) type = 1; // Roads
+        else if (x % 5 === 1 || x % 5 === 4 || y % 5 === 1 || y % 5 === 4) type = 2; // Sidewalk
+        else if (Math.random() > 0.2) type = 3; // Building
+        
+        if (x===2 && y===2) type = 4; // Repaint zone
+        MapGrid[y * MAP_SIZE + x] = type;
+    }
+}
+
+function getTile(x, y) {
+    let tx = Math.floor(x / TILE); let ty = Math.floor(y / TILE);
+    if (tx<0||ty<0||tx>=MAP_SIZE||ty>=MAP_SIZE) return 3; // Bounds are walls
+    return MapGrid[ty * MAP_SIZE + tx];
+}
+
+const Camera = { x: 0, y: 0 };
+
+/**
+ * ENTITIES
+ */
+const Entities = { cars: [], peds: [], bullets: [], particles: [] };
+
+class Entity {
+    constructor(x, y) { this.x = x; this.y = y; this.vx = 0; this.vy = 0; this.angle = 0; this.radius = 10; this.dead = false; }
+    dist(other) { return Math.sqrt((this.x-other.x)**2 + (this.y-other.y)**2); }
+    collides(other) { return this.dist(other) < this.radius + other.radius; }
+}
+
+class Particle extends Entity {
+    constructor(x, y, color, speed, life) {
+        super(x, y); this.color = color; this.life = life; this.maxLife = life;
+        let a = Math.random() * Math.PI * 2;
+        this.vx = Math.cos(a) * speed; this.vy = Math.sin(a) * speed;
+    }
+    update() {
+        this.x += this.vx; this.y += this.vy; this.life--;
+        if (this.life <= 0) this.dead = true;
+    }
+    draw(ctx) {
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = this.life / this.maxLife;
+        ctx.beginPath(); ctx.arc(this.x, this.y, 3, 0, Math.PI*2); ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+class Bullet extends Entity {
+    constructor(x, y, angle, shooter) {
+        super(x, y); this.angle = angle; this.speed = 20; this.shooter = shooter;
+        this.vx = Math.cos(angle)*this.speed; this.vy = Math.sin(angle)*this.speed;
+    }
+    update() {
+        this.x += this.vx; this.y += this.vy;
+        if (getTile(this.x, this.y) === 3) this.dead = true; // Hit wall
+    }
+    draw(ctx) {
+        ctx.fillStyle = '#ff0'; ctx.beginPath(); ctx.arc(this.x, this.y, 2, 0, Math.PI*2); ctx.fill();
+    }
+}
+
+class Pedestrian extends Entity {
+    constructor(x, y, isCop = false) {
+        super(x, y); this.isCop = isCop; this.radius = 12;
+        this.state = 'wander'; this.timer = 0; this.speed = 1.5;
+    }
+    update() {
+        if (this.timer <= 0) {
+            this.angle = Math.random() * Math.PI * 2;
+            this.timer = 60 + Math.random() * 120;
+            if (this.isCop && Game.stars > 0) {
+                // Cops chase player
+                this.angle = Math.atan2(Player.y - this.y, Player.x - this.x);
+                this.speed = 3;
+            } else { this.speed = 1.5; }
+        }
+        this.timer--;
+        
+        let nx = this.x + Math.cos(this.angle) * this.speed;
+        let ny = this.y + Math.sin(this.angle) * this.speed;
+        if (getTile(nx, ny) !== 3) { this.x = nx; this.y = ny; }
+        else { this.timer = 0; } // Turn around
+    }
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+        // Shadow
+        ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(2,2, this.radius, 0, Math.PI*2); ctx.fill();
+        // Body
+        ctx.fillStyle = this.isCop ? '#1d4ed8' : '#e5e7eb';
+        ctx.beginPath(); ctx.arc(0, 0, this.radius, 0, Math.PI*2); ctx.fill();
+        // Head
+        ctx.fillStyle = '#fca5a5'; ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+    }
+    die() {
+        this.dead = true;
+        playSound('hit');
+        for(let i=0; i<10; i++) Entities.particles.push(new Particle(this.x, this.y, '#991b1b', 2, 30));
+        if (!this.isCop && Game.stars < 5) Game.addStar();
+    }
+}
+
+class Vehicle extends Entity {
+    constructor(x, y, color, isPolice = false) {
+        super(x, y); this.color = color; this.isPolice = isPolice;
+        this.width = 24; this.height = 48; this.radius = 24;
+        this.speed = 0; this.maxSpeed = 12; this.hp = 100;
+        this.accel = 0.2; this.friction = 0.95;
+    }
+    update(drivingPlayer = null) {
+        let isGrass = getTile(this.x, this.y) === 0;
+        let actualMaxSpeed = isGrass ? this.maxSpeed * 0.4 : this.maxSpeed;
+        
+        if (drivingPlayer) {
+            let kInput = 0;
+            if (Input.keys['w'] || Input.y < -0.2) kInput = 1;
+            if (Input.keys['s'] || Input.y > 0.2) kInput = -1;
+            
+            if (kInput > 0) this.speed += this.accel;
+            else if (kInput < 0) this.speed -= this.accel;
+            
+            let turnAmt = 0;
+            if (Input.keys['a'] || Input.x < -0.2) turnAmt = -0.05;
+            if (Input.keys['d'] || Input.x > 0.2) turnAmt = 0.05;
+            
+            // Steer only if moving
+            if (Math.abs(this.speed) > 0.5) {
+                this.angle += turnAmt * Math.sign(this.speed);
+            }
+            
+            if (Input.brake) this.speed *= 0.8;
+            
+            // Repaint
+            if (getTile(this.x, this.y) === 4 && Game.stars > 0) {
+                Game.stars = 0; Game.updateUI(); this.color = '#fff';
+            }
+        } else if (this.isPolice && Game.stars > 0) {
+            // Police AI
+            let distToPlayer = this.dist(Player);
+            if (distToPlayer < 500) {
+                let targetAngle = Math.atan2(Player.y - this.y, Player.x - this.x);
+                let diff = targetAngle - this.angle;
+                // Normalize angle
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                
+                this.angle += Math.max(-0.05, Math.min(0.05, diff));
+                this.speed += this.accel;
+            } else { this.speed *= this.friction; }
+        } else {
+            this.speed *= this.friction; // Slow down if empty
+        }
+
+        // Apply speed caps
+        if (this.speed > actualMaxSpeed) this.speed = actualMaxSpeed;
+        if (this.speed < -actualMaxSpeed/2) this.speed = -actualMaxSpeed/2;
+        
+        let nx = this.x + Math.cos(this.angle - Math.PI/2) * this.speed;
+        let ny = this.y + Math.sin(this.angle - Math.PI/2) * this.speed;
+        
+        // Basic Building Collision (AABB approx via circle)
+        if (getTile(nx, ny) === 3) {
+            this.speed *= -0.5; // Bounce
+        } else {
+            this.x = nx; this.y = ny;
+        }
+
+        // Collide with peds
+        if (Math.abs(this.speed) > 3) {
+            Entities.peds.forEach(p => {
+                if (this.collides(p)) p.die();
+            });
+            // Tire smoke
+            if (Input.brake || isGrass) Entities.particles.push(new Particle(this.x, this.y, '#aaa', 1, 10));
+        }
+    }
+    
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+        // Shadow
+        ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(-this.width/2 + 5, -this.height/2 + 5, this.width, this.height);
+        // Chassis
+        ctx.fillStyle = this.hp < 30 ? '#ef4444' : (this.isPolice ? '#1e3a8a' : this.color);
+        ctx.fillRect(-this.width/2, -this.height/2, this.width, this.height);
+        // Roof
+        ctx.fillStyle = this.isPolice ? '#fff' : '#000'; ctx.globalAlpha=0.2;
+        ctx.fillRect(-this.width/2 + 4, -this.height/2 + 10, this.width-8, this.height-20); ctx.globalAlpha=1;
+        // Sirens
+        if (this.isPolice) {
+            ctx.fillStyle = (Date.now()%200 < 100) ? '#f00' : '#00f';
+            ctx.fillRect(-this.width/2+4, 0, this.width-8, 4);
+        }
+        ctx.restore();
+    }
+}
+
+const Player = new class extends Entity {
+    constructor() { super(120, 120); this.radius = 12; this.vehicle = null; this.shootTimer = 0; }
+    
+    update() {
+        if (this.vehicle) {
+            this.x = this.vehicle.x; this.y = this.vehicle.y;
+            this.vehicle.update(this);
+            // Exit vehicle
+            if (Input.enter && this.shootTimer <= 0) {
+                this.vehicle = null;
+                this.x += 30; // Step out
+                this.shootTimer = 30; // Cooldown
+            }
+        } else {
+            // Walk physics
+            let dx = 0, dy = 0;
+            if (Input.keys['w'] || Input.y < -0.2) dy = -1;
+            if (Input.keys['s'] || Input.y > 0.2) dy = 1;
+            if (Input.keys['a'] || Input.x < -0.2) dx = -1;
+            if (Input.keys['d'] || Input.x > 0.2) dx = 1;
+            
+            // Normalize
+            let len = Math.sqrt(dx*dx + dy*dy);
+            if (len > 0) { dx/=len; dy/=len; this.angle = Math.atan2(dy, dx); }
+            
+            let speed = Input.keys['shift'] ? 4 : 2;
+            let nx = this.x + dx * speed; let ny = this.y + dy * speed;
+            if (getTile(nx, ny) !== 3) { this.x = nx; this.y = ny; }
+            
+            // Enter vehicle
+            if (Input.enter && this.shootTimer <= 0) {
+                let closest = null, minDist = 50;
+                Entities.cars.forEach(c => {
+                    let d = this.dist(c); if(d < minDist) { minDist = d; closest = c; }
+                });
+                if (closest) { this.vehicle = closest; this.shootTimer = 30; }
+            }
+            
+            // Shoot
+            if (Input.shoot && this.shootTimer <= 0) {
+                let aimAngle = Input.aimX || Input.aimY ? Math.atan2(Input.aimY, Input.aimX) : this.angle;
+                Entities.bullets.push(new Bullet(this.x, this.y, aimAngle, this));
+                playSound('shoot');
+                this.shootTimer = 15;
+            }
+        }
+        if (this.shootTimer > 0) this.shootTimer--;
+    }
+    
+    draw(ctx) {
+        if (this.vehicle) return; // Don't draw if inside
+        ctx.save(); ctx.translate(this.x, this.y); 
+        
+        let drawAngle = Input.aimX||Input.aimY ? Math.atan2(Input.aimY, Input.aimX) : this.angle;
+        ctx.rotate(drawAngle);
+        
+        ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.arc(2,2, this.radius, 0, Math.PI*2); ctx.fill();
+        // Body
+        ctx.fillStyle = '#10b981'; ctx.beginPath(); ctx.arc(0, 0, this.radius, 0, Math.PI*2); ctx.fill();
+        // Hands/Gun
+        ctx.fillStyle = '#333'; ctx.fillRect(10, 2, 8, 4);
+        ctx.restore();
+    }
+};
+
+/**
+ * GAME ENGINE
+ */
+const Game = {
+    money: 500, health: 100, armor: 50, stars: 0,
+    radioTracks: ["OFF", "GTA Theme", "Synthwave", "Rock Radio"],
+    currRadio: 0,
+    
+    init() {
+        // Spawn Cars
+        const colors = ['#f87171', '#fbbf24', '#60a5fa', '#a78bfa', '#f472b6'];
+        for(let i=0; i<15; i++) {
+            let x, y;
+            do { x = Math.random()*MAP_SIZE*TILE; y = Math.random()*MAP_SIZE*TILE; } while(getTile(x,y) !== 1);
+            Entities.cars.push(new Vehicle(x, y, colors[Math.floor(Math.random()*colors.length)]));
+        }
+        // Spawn Peds
+        for(let i=0; i<30; i++) {
+            let x, y;
+            do { x = Math.random()*MAP_SIZE*TILE; y = Math.random()*MAP_SIZE*TILE; } while(getTile(x,y) === 3);
+            Entities.peds.push(new Pedestrian(x, y));
+        }
+        this.updateUI();
+        
+        document.getElementById('ui-radio').addEventListener('click', () => {
+            this.currRadio = (this.currRadio + 1) % this.radioTracks.length;
+            document.getElementById('ui-radio').innerText = "Radio: " + this.radioTracks[this.currRadio];
+        });
+        
+        requestAnimationFrame(this.loop.bind(this));
+    },
+    
+    addStar() {
+        if(this.stars < 5) {
+            this.stars++; this.updateUI();
+            // Spawn police car
+            let px = Player.x + (Math.random()>0.5?1000:-1000);
+            let py = Player.y + (Math.random()>0.5?1000:-1000);
+            Entities.cars.push(new Vehicle(px, py, '#000', true));
+        }
+    },
+    
+    updateUI() {
+        document.getElementById('ui-money').innerText = `$${this.money.toString().padStart(6, '0')}`;
+        document.getElementById('ui-health').style.width = `${this.health}%`;
+        document.getElementById('ui-armor').style.width = `${this.armor}%`;
+        let starsHtml = '';
+        for(let i=0; i<5; i++) starsHtml += i < this.stars ? '<span class="star active">★</span> ' : '<span class="star">★</span> ';
+        document.getElementById('ui-stars').innerHTML = starsHtml;
+    },
+    
+    update() {
+        Player.update();
+        
+        Entities.cars.forEach(c => { if(c !== Player.vehicle) c.update(); });
+        Entities.peds.forEach(p => p.update());
+        
+        Entities.bullets.forEach(b => {
+            b.update();
+            // Bullet vs Peds
+            Entities.peds.forEach(p => { if(!b.dead && p.collides(b)) { p.die(); b.dead = true; } });
+        });
+        
+        Entities.particles.forEach(p => p.update());
+        
+        // Cleanup dead
+        Entities.bullets = Entities.bullets.filter(b => !b.dead);
+        Entities.particles = Entities.particles.filter(p => !p.dead);
+        Entities.peds = Entities.peds.filter(p => !p.dead);
+        
+        // Spawn new peds to keep world alive
+        if(Entities.peds.length < 30 && Math.random() < 0.05) {
+            let x = Player.x + (Math.random()-0.5)*1000;
+            let y = Player.y + (Math.random()-0.5)*1000;
+            if (getTile(x,y) !== 3) Entities.peds.push(new Pedestrian(x, y, (this.stars>0 && Math.random()<0.3)));
+        }
+        
+        // Camera logic
+        Camera.x = Player.x - W/2; Camera.y = Player.y - H/2;
+    },
+    
+    draw() {
+        CTX.clearRect(0, 0, W, H);
+        CTX.save();
+        CTX.translate(-Camera.x, -Camera.y);
+        
+        // Viewport bounds
+        let startCol = Math.max(0, Math.floor(Camera.x / TILE));
+        let endCol = Math.min(MAP_SIZE, Math.ceil((Camera.x + W) / TILE));
+        let startRow = Math.max(0, Math.floor(Camera.y / TILE));
+        let endRow = Math.min(MAP_SIZE, Math.ceil((Camera.y + H) / TILE));
+        
+        // Draw Map
+        for (let y = startRow; y < endRow; y++) {
+            for (let x = startCol; x < endCol; x++) {
+                let type = MapGrid[y * MAP_SIZE + x];
+                let px = x * TILE; let py = y * TILE;
+                
+                if (type === 0) CTX.fillStyle = '#4ade80'; // Grass
+                else if (type === 1) CTX.fillStyle = '#374151'; // Road
+                else if (type === 2) CTX.fillStyle = '#9ca3af'; // Sidewalk
+                else if (type === 3) CTX.fillStyle = '#1f2937'; // Building
+                else if (type === 4) CTX.fillStyle = '#a3e635'; // Repaint zone
+                
+                CTX.fillRect(px, py, TILE, TILE);
+                
+                // Road markings
+                if (type === 1) {
+                    CTX.fillStyle = '#fff';
+                    CTX.fillRect(px + TILE/2 - 2, py + 10, 4, 20);
+                    CTX.fillRect(px + TILE/2 - 2, py + 50, 4, 20);
+                }
+            }
+        }
+        
+        // Draw Particles
+        Entities.particles.forEach(p => p.draw(CTX));
+        // Draw Entities (Depth sort simplistic: Peds -> Cars -> Player)
+        Entities.peds.forEach(p => p.draw(CTX));
+        Entities.cars.forEach(c => c.draw(CTX));
+        Player.draw(CTX);
+        Entities.bullets.forEach(b => b.draw(CTX));
+        
+        // Draw buildings height pseudo-3D
+        for (let y = startRow; y < endRow; y++) {
+            for (let x = startCol; x < endCol; x++) {
+                if (MapGrid[y * MAP_SIZE + x] === 3) {
+                    let px = x * TILE; let py = y * TILE;
+                    CTX.fillStyle = 'rgba(0,0,0,0.5)';
+                    CTX.beginPath(); CTX.moveTo(px, py); CTX.lineTo(px+TILE, py); CTX.lineTo(px+TILE+15, py-15); CTX.lineTo(px+15, py-15); CTX.fill();
+                    CTX.fillStyle = '#111827';
+                    CTX.fillRect(px, py-15, TILE, 15);
+                }
+            }
+        }
+        
+        CTX.restore();
+    },
+    
+    loop() { this.update(); this.draw(); requestAnimationFrame(this.loop.bind(this)); }
+};
+
+// Start
+Game.init();
+
+</script>
+</body>
+</html>
