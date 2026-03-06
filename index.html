@@ -2,307 +2,179 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cyber City Ultra 3D</title>
+    <title>NFS: Most Wanted - Web Edition</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #010105; font-family: 'Consolas', monospace; }
-        #ui { position: absolute; top: 20px; left: 20px; color: #0ff; z-index: 10; pointer-events: none; }
-        .hud { background: rgba(0,0,0,0.8); padding: 15px; border-left: 5px solid #0ff; margin-bottom: 10px; }
-        .money { font-size: 28px; color: #0f0; }
-        .hint { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); color: #fff; background: rgba(0,0,0,0.8); padding: 10px 30px; border: 1px solid #ff00ff; border-radius: 5px; }
-        #loading { position: fixed; inset: 0; background: #000; display: flex; flex-direction: column; justify-content: center; align-items: center; color: #0ff; z-index: 1000; }
-        .loader-bar { width: 200px; height: 4px; background: #111; margin-top: 10px; overflow: hidden; }
-        .loader-fill { width: 0%; height: 100%; background: #0ff; transition: width 0.3s; }
+        body { margin: 0; overflow: hidden; font-family: 'Arial', sans-serif; background: #000; }
+        #ui { position: absolute; bottom: 20px; right: 20px; color: #fff; text-align: right; pointer-events: none; }
+        #speedo { font-size: 48px; font-weight: bold; font-style: italic; text-shadow: 2px 2px #f00; }
+        #nitro-bar { width: 200px; height: 10px; border: 2px solid #fff; margin-top: 5px; background: rgba(0,0,0,0.5); }
+        #nitro-fill { width: 100%; height: 100%; background: #00f; transition: width 0.1s; }
+        #heat { position: absolute; top: 20px; right: 20px; color: #fb0; font-size: 24px; font-weight: bold; }
+        canvas { display: block; }
+        .instructions { position: absolute; top: 10px; left: 10px; color: #aaa; font-size: 12px; }
     </style>
 </head>
 <body>
 
-<div id="loading">
-    <div>CONSTRUCTING REALITY...</div>
-    <div class="loader-bar"><div id="loader-fill" class="loader-fill"></div></div>
-</div>
-
+<div class="instructions">WASD - Управление | SHIFT - Ручник | SPACE - НИТРО</div>
+<div id="heat">HEAT: 1</div>
 <div id="ui">
-    <div class="hud">
-        <div class="money" id="money">$001,450</div>
-        <div id="mode-text">STATUS: ON FOOT</div>
-        <div id="speed-text" style="display:none">SPEED: 0 KM/H</div>
-    </div>
+    <div id="speedo">0 KM/H</div>
+    <div id="nitro-bar"><div id="nitro-fill"></div></div>
+    <div>NITROUS</div>
 </div>
 
-<div class="hint">F - ENTER/EXIT CAR | WASD - MOVE | SPACE - HANDBRAKE</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
-<script type="importmap">
-    {
-        "imports": {
-            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-        }
-    }
-</script>
+<script>
+/**
+ * ГЕЙМ-ЛОГИКА: NFS WEB EDITION
+ */
 
-<script type="module">
-    import * as THREE from 'three';
-    import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-    import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-    import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+// 1. Инициализация сцены
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000000, 10, 100);
 
-    // --- КИБЕР-ДВИЖОК ---
-    let scene, camera, renderer, composer, clock;
-    let player, car, currentMode = 'foot';
-    let buildings = [], traffic = [], obstacles = [];
-    const keys = {};
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setClearColor(0x111111);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
 
-    // Физика
-    let carData = { speed: 0, accel: 0.007, friction: 0.97, maxSpeed: 0.7, angle: 0, turnSpeed: 0.04 };
-    let playerRotation = 0;
+// 2. Освещение
+const ambient = new THREE.AmbientLight(0x404040, 2);
+scene.add(ambient);
+const sun = new THREE.DirectionalLight(0xffffff, 1);
+sun.position.set(10, 20, 10);
+sun.castShadow = true;
+scene.add(sun);
 
-    // Ресурсы (генерация текстур на лету)
-    const textures = {};
+// 3. Создание города (Простая сетка)
+const roadGeo = new THREE.PlaneGeometry(2000, 2000);
+const roadMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+const ground = new THREE.Mesh(roadGeo, roadMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
 
-    init();
-
-    async function init() {
-        clock = new THREE.Clock();
-        scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x010103);
-        scene.fog = new THREE.FogExp2(0x010103, 0.025);
-
-        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1500);
+function createBuildings() {
+    const bGeo = new THREE.BoxGeometry(1, 1, 1);
+    for(let i = 0; i < 200; i++) {
+        const h = 5 + Math.random() * 15;
+        const material = new THREE.MeshStandardMaterial({ color: 0x444444 });
+        const building = new THREE.Mesh(bGeo, material);
         
-        renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        renderer.toneMapping = THREE.ReinhardToneMapping;
-        document.body.appendChild(renderer.domElement);
-
-        updateLoading(20);
-
-        generateTextures();
-        updateLoading(40);
-
-        buildCity();
-        updateLoading(70);
-
-        createEntities();
-        setupPostProcessing();
-        updateLoading(100);
-
-        // Events
-        window.addEventListener('keydown', e => { keys[e.code] = true; if(e.code === 'KeyF') tryToggleMode(); });
-        window.addEventListener('keyup', e => { keys[e.code] = false; });
-        window.addEventListener('resize', onWindowResize);
-
-        setTimeout(() => document.getElementById('loading').style.display = 'none', 500);
-        animate();
-    }
-
-    function updateLoading(val) { document.getElementById('loader-fill').style.width = val + '%'; }
-
-    // --- ГЕНЕРАТОР ТЕКСТУР (Создаем "картинки" из кода) ---
-    function generateTextures() {
-        const createT = (size, drawFn) => {
-            const canvas = document.createElement('canvas');
-            canvas.width = canvas.height = size;
-            const ctx = canvas.getContext('2d');
-            drawFn(ctx, size);
-            const tex = new THREE.CanvasTexture(canvas);
-            tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-            return tex;
-        };
-
-        // Окна зданий
-        textures.windows = createT(256, (ctx, s) => {
-            ctx.fillStyle = '#050505'; ctx.fillRect(0,0,s,s);
-            for(let y=0; y<s; y+=16) {
-                for(let x=0; x<s; x+=16) {
-                    if(Math.random() > 0.6) {
-                        ctx.fillStyle = Math.random() > 0.5 ? '#0ff' : '#f0f';
-                        ctx.shadowBlur = 5; ctx.shadowColor = ctx.fillStyle;
-                        ctx.fillRect(x+2, y+2, 12, 12);
-                    }
-                }
-            }
-        });
-
-        // Асфальт
-        textures.road = createT(512, (ctx, s) => {
-            ctx.fillStyle = '#111'; ctx.fillRect(0,0,s,s);
-            ctx.strokeStyle = '#333'; ctx.lineWidth = 2;
-            for(let i=0; i<s; i+=32) { ctx.beginPath(); ctx.moveTo(i,0); ctx.lineTo(i,s); ctx.stroke(); }
-            ctx.fillStyle = '#ff0'; ctx.fillRect(s/2-5, 20, 10, 60); ctx.fillRect(s/2-5, 140, 10, 60);
-        });
-    }
-
-    // --- СТРОИТЕЛЬСТВО ГОРОДА ---
-    function buildCity() {
-        const size = 1200;
-        const blockSize = 40;
-
-        // Поверхность
-        const floorGeo = new THREE.PlaneGeometry(size, size);
-        const floorMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a, roughness: 0.2 });
-        const floor = new THREE.Mesh(floorGeo, floorMat);
-        floor.rotation.x = -Math.PI / 2;
-        scene.add(floor);
-
-        // Дороги и Здания
-        for(let x = -size/2; x < size/2; x += blockSize) {
-            for(let z = -size/2; z < size/2; z += blockSize) {
-                if (Math.abs(x) < 20 && Math.abs(z) < 20) continue; // Центр пустой
-
-                const isRoad = (Math.abs(x) % (blockSize*2) === 0) || (Math.abs(z) % (blockSize*2) === 0);
-
-                if (isRoad) {
-                    const road = new THREE.Mesh(
-                        new THREE.PlaneGeometry(blockSize, blockSize),
-                        new THREE.MeshStandardMaterial({ map: textures.road })
-                    );
-                    road.rotation.x = -Math.PI/2;
-                    road.position.set(x, 0.1, z);
-                    scene.add(road);
-                } else {
-                    // Строим здание
-                    const h = 20 + Math.random() * 80;
-                    const bGeo = new THREE.BoxGeometry(blockSize-10, h, blockSize-10);
-                    const bMat = new THREE.MeshStandardMaterial({ 
-                        color: 0x111111, 
-                        map: textures.windows,
-                        emissive: 0x555555,
-                        emissiveMap: textures.windows
-                    });
-                    
-                    const b = new THREE.Mesh(bGeo, bMat);
-                    b.position.set(x, h/2, z);
-                    scene.add(b);
-                    buildings.push(b);
-
-                    // Световая антенна на крыше
-                    if(Math.random() > 0.7) {
-                        const ant = new THREE.PointLight(Math.random() > 0.5 ? 0x0ff : 0xf0f, 50, 40);
-                        ant.position.set(x, h+1, z);
-                        scene.add(ant);
-                    }
-                }
-            }
-        }
-    }
-
-    function createEntities() {
-        // Игрок (Кибер-человек)
-        player = new THREE.Group();
-        const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.5, 1, 4, 8), new THREE.MeshStandardMaterial({color: 0x00ffcc}));
-        body.position.y = 1;
-        player.add(body);
-        scene.add(player);
-        player.position.set(0, 0, 5);
-
-        // Машина (Детализированная)
-        car = new THREE.Group();
-        const bodyMat = new THREE.MeshStandardMaterial({ color: 0x000000, metalness: 1, roughness: 0.1 });
-        const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.6, 4.5), bodyMat);
-        chassis.position.y = 0.5;
-        car.add(chassis);
-
-        const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.5, 2), new THREE.MeshStandardMaterial({color: 0x00ffff, transparent: true, opacity: 0.5}));
-        cabin.position.set(0, 1, -0.2);
-        car.add(cabin);
-
-        // Фары
-        const createLight = (x, color) => {
-            const l = new THREE.PointLight(color, 20, 15);
-            l.position.set(x, 0.5, 2.3);
-            return l;
-        };
-        car.add(createLight(0.8, 0xffffff), createLight(-0.8, 0xffffff));
+        let x = (Math.random() - 0.5) * 400;
+        let z = (Math.random() - 0.5) * 400;
         
-        car.position.set(8, 0, 10);
-        scene.add(car);
+        // Оставляем дорогу пустой (упрощенно)
+        if (Math.abs(x) < 10) x += 20; 
+        
+        building.scale.set(10, h, 10);
+        building.position.set(x, h/2, z);
+        building.castShadow = true;
+        scene.add(building);
+    }
+}
+createBuildings();
+
+// 4. Машина игрока (BMW M3 GTR Style)
+const carGroup = new THREE.Group();
+const body = new THREE.Mesh(
+    new THREE.BoxGeometry(1.5, 0.6, 4),
+    new THREE.MeshStandardMaterial({ color: 0x1133ff })
+);
+body.position.y = 0.5;
+body.castShadow = true;
+carGroup.add(body);
+
+// Полоски
+const stripe = new THREE.Mesh(
+    new THREE.BoxGeometry(0.8, 0.61, 4.05),
+    new THREE.MeshStandardMaterial({ color: 0xcccccc })
+);
+stripe.position.y = 0.5;
+carGroup.add(stripe);
+
+scene.add(carGroup);
+
+// 5. Управление и Физика
+const keys = {};
+window.addEventListener('keydown', (e) => keys[e.code] = true);
+window.addEventListener('keyup', (e) => keys[e.code] = false);
+
+let velocity = 0;
+let rotation = 0;
+const stats = {
+    maxSpeed: 1.2,
+    accel: 0.005,
+    decel: 0.002,
+    nitro: 100,
+    isNitro: false
+};
+
+// 6. Игровой цикл
+function update() {
+    // Движение
+    if (keys['KeyW']) velocity += stats.accel * (stats.isNitro ? 2 : 1);
+    if (keys['KeyS']) velocity -= stats.accel;
+    
+    // Трение
+    velocity *= 0.98;
+
+    // Повороты (только в движении)
+    if (Math.abs(velocity) > 0.01) {
+        const steerDir = velocity > 0 ? 1 : -1;
+        if (keys['KeyA']) rotation += 0.04 * steerDir;
+        if (keys['KeyD']) rotation -= 0.04 * steerDir;
     }
 
-    function setupPostProcessing() {
-        const renderPass = new RenderPass(scene, camera);
-        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
-        composer = new EffectComposer(renderer);
-        composer.addPass(renderPass);
-        composer.addPass(bloomPass);
+    // Ручник
+    if (keys['ShiftLeft']) velocity *= 0.95;
+
+    // Нитро
+    if (keys['Space'] && stats.nitro > 0) {
+        stats.isNitro = true;
+        stats.nitro -= 0.5;
+        camera.fov = 85; // Эффект скорости
+    } else {
+        stats.isNitro = false;
+        if (stats.nitro < 100) stats.nitro += 0.1;
+        camera.fov = 75;
     }
+    camera.updateProjectionMatrix();
 
-    // --- ЛОГИКА ---
-    function tryToggleMode() {
-        const dist = player.position.distanceTo(car.position);
-        if (currentMode === 'foot' && dist < 6) {
-            currentMode = 'car';
-            player.visible = false;
-            document.getElementById('mode-text').innerText = 'STATUS: DRIVING';
-            document.getElementById('speed-text').style.display = 'block';
-        } else if (currentMode === 'car') {
-            currentMode = 'foot';
-            player.visible = true;
-            player.position.copy(car.position).add(new THREE.Vector3(4, 0, 0));
-            document.getElementById('mode-text').innerText = 'STATUS: ON FOOT';
-            document.getElementById('speed-text').style.display = 'none';
-        }
-    }
+    // Обновление позиции
+    carGroup.position.x += Math.sin(rotation) * velocity;
+    carGroup.position.z += Math.cos(rotation) * velocity;
+    carGroup.rotation.y = rotation;
 
-    function updatePhysics() {
-        if (currentMode === 'foot') {
-            const speed = 0.25;
-            if (keys['KeyW']) {
-                player.position.x -= Math.sin(playerRotation) * speed;
-                player.position.z -= Math.cos(playerRotation) * speed;
-            }
-            if (keys['KeyS']) {
-                player.position.x += Math.sin(playerRotation) * speed;
-                player.position.z += Math.cos(playerRotation) * speed;
-            }
-            if (keys['KeyA']) playerRotation += 0.05;
-            if (keys['KeyD']) playerRotation -= 0.05;
-            
-            player.rotation.y = playerRotation;
+    // Камера (Follow)
+    const camOffset = new THREE.Vector3(
+        -Math.sin(rotation) * 10,
+        5,
+        -Math.cos(rotation) * 10
+    );
+    camera.position.lerp(carGroup.position.clone().add(camOffset), 0.1);
+    camera.lookAt(carGroup.position);
 
-            // Камера пешком
-            const camTarget = player.position.clone().add(new THREE.Vector3(Math.sin(playerRotation)*12, 6, Math.cos(playerRotation)*12));
-            camera.position.lerp(camTarget, 0.1);
-            camera.lookAt(player.position.clone().add(new THREE.Vector3(0, 1, 0)));
-        } else {
-            // Машина
-            if (keys['KeyW']) carData.speed += carData.accel;
-            if (keys['KeyS']) carData.speed -= carData.accel;
-            if (keys['Space']) carData.speed *= 0.9; // Ручник
+    // UI
+    document.getElementById('speedo').innerText = Math.round(Math.abs(velocity) * 200) + " KM/H";
+    document.getElementById('nitro-fill').style.width = stats.nitro + "%";
 
-            carData.speed *= carData.friction;
-            if (Math.abs(carData.speed) > 0.01) {
-                const turnDir = carData.speed > 0 ? 1 : -1;
-                if (keys['KeyA']) carData.angle += carData.turnSpeed * turnDir;
-                if (keys['KeyD']) carData.angle -= carData.turnSpeed * turnDir;
-            }
+    renderer.render(scene, camera);
+    requestAnimationFrame(update);
+}
 
-            car.position.x += Math.sin(carData.angle) * carData.speed;
-            car.position.z += Math.cos(carData.angle) * carData.speed;
-            car.rotation.y = carData.angle;
+// Ресайз
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
 
-            // Камера в машине
-            const camOffset = new THREE.Vector3(Math.sin(carData.angle)*-18, 8, Math.cos(carData.angle)*-18);
-            camera.position.lerp(car.position.clone().add(camOffset), 0.1);
-            camera.lookAt(car.position);
-
-            document.getElementById('speed-text').innerText = `SPEED: ${Math.round(Math.abs(carData.speed)*400)} KM/H`;
-        }
-    }
-
-    function onWindowResize() {
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        composer.setSize(window.innerWidth, window.innerHeight);
-    }
-
-    function animate() {
-        requestAnimationFrame(animate);
-        updatePhysics();
-        composer.render();
-    }
+update();
 </script>
 </body>
 </html>
